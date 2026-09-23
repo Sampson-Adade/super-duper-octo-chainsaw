@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { GameSocket } from '../lib/game-socket';
 import { validateUsername } from '@glitch/shared';
-import type { Difficulty, PublicRoom } from '@glitch/shared';
+import type { Difficulty, PublicRoom, RestartVoteChoice } from '@glitch/shared';
 import { QRCodeSVG } from 'qrcode.react';
 import { HowToPlay } from '../components/how-to-play';
 
@@ -12,6 +12,7 @@ const difficultyOptions: { id: Difficulty; label: string; seconds: number }[] = 
   { id: 'medium', label: 'MEDIUM', seconds: 60 },
   { id: 'hard', label: 'HARD', seconds: 30 },
 ];
+const RESTARTABLE_PHASES = ['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'] as const;
 
 // Always share the public production address from deployed previews too. Vercel
 // preview URLs can require the project owner to log in, which blocks invitees.
@@ -311,13 +312,28 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   }
 
   function restartGame() {
-    if (!window.confirm('Restart the game with the same players and settings?')) return;
+    if (room?.mode !== 'solo') {
+      socket?.emit('game:restart-request', {}, (result: any) => {
+        if (!result?.ok) setErr(result?.error || 'Could not request a restart vote.');
+        else setErr('Restart request sent to the room.');
+      });
+      return;
+    }
+    if (!window.confirm('Restart the whole game from round one?')) return;
     socket?.emit('game:restart', {}, (result: any) => {
       if (!result?.ok) return setErr(result?.error || 'Could not restart the game.');
       setSource('');
       setAllyReply('');
       setAllyPrompt('');
       setErr('');
+    });
+  }
+
+  function castRestartVote(choice: RestartVoteChoice) {
+    if (!room?.restartVote) return;
+    socket?.emit('game:restart-vote', { choice, ballot: room.restartVote.ballot }, (result: any) => {
+      if (!result?.ok) setErr(result?.error || 'Could not submit your restart vote.');
+      else setErr('');
     });
   }
 
@@ -429,6 +445,12 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
     : raid
       ? [['DIVIDE', 'The lead has three opening lines. Every operative gets two personal lines using their callsign.'], ['QUICK ADD', 'Use the unlocked buttons for assigned lines, then type the rest exactly, including semicolons.'], ['SUBMIT', 'Everyone submits their own contribution. The boss needs three plus two lines per operative.'], ['BREACH', 'Joiners wait for the next round; the boss erases code near the deadline.']]
       : [['READ', 'Use the threat trigger, target another player’s exact callsign, then add the bypass.'], ['QUICK ADD', 'Two buttons start unlocked. One more unlocks each syntax level; type every other line.'], ['SUBMIT', 'Send the three core lines. Then review the round while everyone else finishes.'], ['PLAY THE ROOM', 'Level 2 adds challengeable physical claims. The host verifies claims; the game judge scores the round.']];
+  const restartVote = room.restartVote;
+  const restartAllowVotes = restartVote ? Object.values(restartVote.votes).filter((vote) => vote === 'allow').length : 0;
+  const restartDenyVotes = restartVote ? Object.values(restartVote.votes).filter((vote) => vote === 'deny').length : 0;
+  const restartVotesWaiting = restartVote ? restartVote.eligiblePlayerIds.filter((id) => !restartVote.votes[id]).length : 0;
+  const myRestartVote = restartVote?.votes[playerId];
+  const canVoteOnRestart = Boolean(restartVote?.status === 'open' && restartVote.eligiblePlayerIds.includes(playerId) && !myRestartVote);
 
   return (
     <main className={mainClass}>
@@ -438,7 +460,7 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
           <button className="roomTag roomShare" onClick={copyInviteLink} aria-label="Copy room invite link">ROOM <b>{room.code}</b><span className={copied ? 'copied' : ''}>{copied ? 'LINK COPIED!' : 'COPY LINK'}</span></button>
           <button className="manualButton" onClick={() => setShowManual(true)}>HOW TO PLAY</button>
           <button className="backButton" onClick={goBack} disabled={room.phase === 'LOBBY' || !me?.host} title={!me?.host ? 'Only the room host can return everyone to options' : room.phase === 'LOBBY' ? 'You are already at the previous step' : 'Go back one step to room options'}>← Back</button>
-          <button className="restartButton" disabled={!me?.host || !['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'].includes(room.phase)} title="Restart the whole game from round one" onClick={restartGame}>RESTART GAME</button>
+          <button className="restartButton" disabled={!me || (solo && !me.host) || !RESTARTABLE_PHASES.includes(room.phase as typeof RESTARTABLE_PHASES[number]) || (!solo && restartVote?.status === 'open')} title={solo ? 'Restart the whole game from round one' : 'Request a room vote to restart from round one'} onClick={restartGame}>RESTART GAME</button>
           <button className="homeButton" onClick={goHome}>Home</button>
         </div>
       </header>
@@ -452,6 +474,17 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
             </div>
             {room.deadline && <div className="timer"><span>{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</span><small>{room.phase.replace('_', ' ')}</small></div>}
           </div>
+
+          {restartVote && <section className={`restartVotePanel ${restartVote.status === 'denied' ? 'denied' : ''}`} role={restartVote.status === 'open' ? 'dialog' : 'status'} aria-live="polite" aria-labelledby="restartVoteTitle">
+            <div className="eyebrow">{restartVote.status === 'open' ? `ROOM RESTART VOTE · BALLOT ${restartVote.ballot}` : 'RESTART VOTE RESULT'}</div>
+            <h2 id="restartVoteTitle">{restartVote.status === 'open' ? `${restartVote.requesterName} wants to restart from round one.` : `${restartVote.requesterName}’s restart request was denied.`}</h2>
+            {restartVote.status === 'open' ? <>
+              <p>{restartVote.ballot > 1 ? 'The last ballot was tied. Everyone votes again until Allow or Deny leads.' : 'Should the room restart from round one? Everyone in the room, including the requester, gets one vote.'}</p>
+              <div className="restartVoteTally"><span>ALLOW <b>{restartAllowVotes}</b></span><span>DENY <b>{restartDenyVotes}</b></span><span>WAITING <b>{restartVotesWaiting}</b></span></div>
+              {canVoteOnRestart ? <div className="restartVoteActions"><button onClick={() => castRestartVote('allow')}>ALLOW RESTART</button><button onClick={() => castRestartVote('deny')}>DENY RESTART</button></div>
+                : <div className="restartVoteStatus">{myRestartVote ? `YOUR VOTE: ${myRestartVote.toUpperCase()} · WAITING FOR THE ROOM` : 'Waiting for connected room players to vote.'}</div>}
+            </> : <p>The room voted {restartAllowVotes} to allow and {restartDenyVotes} to deny. The current game continues.</p>}
+          </section>}
 
           {room.phase === 'LOBBY' ? <>
             {me?.host && <div className="modechoices" role="group" aria-label="Choose game mode">

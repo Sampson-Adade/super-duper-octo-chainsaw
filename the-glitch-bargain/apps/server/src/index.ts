@@ -1,6 +1,6 @@
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { validateUsername } from '@glitch/shared';
-import type { Phase, Personality, Difficulty, RaidAssignment, TerminalEvent } from '@glitch/shared';
+import type { Phase, Personality, Difficulty, RaidAssignment, RestartVoteChoice, TerminalEvent } from '@glitch/shared';
 
 let io: any = null;
 const rooms = new Map<string, any>();
@@ -70,6 +70,7 @@ const threats = [
   { text: 'The AI will purge whoever is nearest a window.', trigger: 'shutdown' },
 ];
 const difficultySeconds: Record<Difficulty, number> = { easy: 90, medium: 60, hard: 30 };
+const RESTARTABLE_PHASES: Phase[] = ['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'];
 const CORE_DRAIN_SIGNOFF = '[CORE DRAIN: "I can only complete 50% of this entire journey. Good luck soldier."]';
 const difficultyValue = (value: unknown): Difficulty => value === 'easy' || value === 'hard' ? value : 'medium';
 const cleanName = (value: unknown, fallback: string) => validateUsername(value || fallback).name || fallback;
@@ -312,6 +313,11 @@ function pub(room: any, revealClaims = false) {
       claims: submission.claims.map((claim: any) => ({ ...claim, verified: revealClaims || room.phase === 'RESOLUTION' || room.phase === 'GAME_OVER' ? claim.verified : null })),
     })),
     challenges: room.challenges,
+    restartVote: room.restartVote ? {
+      ...room.restartVote,
+      eligiblePlayerIds: [...room.restartVote.eligiblePlayerIds],
+      votes: { ...room.restartVote.votes },
+    } : null,
     narration: room.narration,
   };
 }
@@ -446,6 +452,7 @@ function advance(room: any) {
   }
 }
 function startRound(room: any, retry = false) {
+  room.restartVote = null;
   if (!retry) {
     room.terminalEvents = [];
     room.terminalSequence = 0;
@@ -488,6 +495,63 @@ function startRound(room: any, retry = false) {
   room.soloOutcome = null;
   const seconds = room.config.mode === 'raid' ? raidDurationSeconds(room) : difficultySeconds[room.config.difficulty as Difficulty];
   phase(room, 'HACKING', seconds);
+}
+function restartFromRoundOne(room: any) {
+  if (room.phaseTimer) clearTimeout(room.phaseTimer);
+  room.phaseTimer = null;
+  room.restartVote = null;
+  room.round = 0;
+  room.campaignStage = 1;
+  room.lives = room.maxLives;
+  room.capturedAis = [];
+  room.allies = [];
+  room.selectedAllyId = null;
+  room.pendingMergeAiId = null;
+  room.usedAiNames = [];
+  room.terminalEvents = [];
+  room.terminalSequence = 0;
+  room.thermalHeat = Object.fromEntries(room.players.map((player: any) => [player.id, 35]));
+  room.thermalLastRoll = {};
+  room.players.forEach((player: any) => { player.score = 0; player.alive = true; player.queuedForNextRound = false; });
+  room.narration = '';
+  startRound(room);
+}
+function resumeAfterRestartDenied(room: any, vote: any) {
+  if (vote.resumeDeadline && room.phase !== 'GAME_OVER') {
+    const secondsLeft = Math.max(2, Math.ceil((vote.resumeDeadline - Date.now()) / 1000));
+    room.phaseStartedAt = Date.now();
+    room.phaseDurationSeconds = secondsLeft;
+    room.deadline = room.phaseStartedAt + secondsLeft * 1000;
+    schedulePhaseDeadline(room, room.phase as Phase);
+  } else room.deadline = null;
+  emit(room);
+}
+function settleRestartVote(room: any) {
+  const vote = room.restartVote;
+  if (!vote || vote.status !== 'open') return;
+  const connectedIds = new Set(room.players.filter((player: any) => player.connected).map((player: any) => player.id));
+  vote.eligiblePlayerIds = vote.eligiblePlayerIds.filter((id: string) => connectedIds.has(id));
+  for (const id of Object.keys(vote.votes)) if (!vote.eligiblePlayerIds.includes(id)) delete vote.votes[id];
+  if (!vote.eligiblePlayerIds.length) {
+    vote.status = 'denied';
+    resumeAfterRestartDenied(room, vote);
+    return;
+  }
+  if (!vote.eligiblePlayerIds.every((id: string) => vote.votes[id])) { emit(room); return; }
+  const choices = Object.values(vote.votes) as RestartVoteChoice[];
+  const allow = choices.filter((choice) => choice === 'allow').length;
+  const deny = choices.filter((choice) => choice === 'deny').length;
+  if (allow === deny) {
+    vote.ballot++;
+    vote.eligiblePlayerIds = room.players.filter((player: any) => player.connected).map((player: any) => player.id);
+    vote.votes = {};
+    if (!vote.eligiblePlayerIds.length) vote.status = 'denied';
+    emit(room);
+    return;
+  }
+  if (allow > deny) { restartFromRoundOne(room); return; }
+  vote.status = 'denied';
+  resumeAfterRestartDenied(room, vote);
 }
 function finishSoloFailure(room: any) {
   if (room.config.mode !== 'solo' || room.phase !== 'COUNTER_CODING') return;
@@ -685,6 +749,7 @@ export function attachGameServer(transport: any) {
       syntaxLevel: 1, threatType: 'purge', submissions: [], challenges: [], hostSocketId: socket.id,
       aiName: null, soloRequiredCode: [], lives: 3, maxLives: 3, capturedAis: [], usedAiNames: [], assistUsed: false, counterCode: null, soloOutcome: null,
       terminalEvents: [], terminalSequence: 0, thermalHeat: { [id]: 35 }, thermalLastRoll: {}, raidParticipantIds: [], raidIncomplete: false,
+      restartVote: null,
     };
     rooms.set(code, room);
     socket.join(code);
@@ -711,6 +776,9 @@ export function attachGameServer(transport: any) {
       room.thermalHeat[player.id] = 35;
       if (player.queuedForNextRound) terminalEvent(room, `${player.name} joined the room and is queued for the next round.`);
     } else { player.connected = true; player.socketId = socket.id; player.queuedForNextRound = Boolean(player.queuedForNextRound); }
+    if (room.restartVote?.status === 'open' && !room.restartVote.eligiblePlayerIds.includes(player.id)) {
+      room.restartVote.eligiblePlayerIds.push(player.id);
+    }
     socket.join(room.code);
     if (player.id === room.hostId) room.hostSocketId = socket.id;
     socket.data.playerId = player.id;
@@ -740,26 +808,52 @@ export function attachGameServer(transport: any) {
   register('game:restart', (_data: any = {}, callback: any) => {
     const room = rooms.get(socket.data.room);
     if (!room || room.hostId !== socket.data.playerId) return callback?.({ ok: false, error: 'Only the host can restart the game.' });
-    if (!['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'].includes(room.phase)) {
+    if (room.config.mode !== 'solo') return callback?.({ ok: false, error: 'Multiplayer rooms must vote to restart.' });
+    if (!RESTARTABLE_PHASES.includes(room.phase)) {
       return callback?.({ ok: false, error: 'Restart is available after a round ends.' });
     }
-    if (room.config.mode === 'solo' ? room.players.length !== 1 : room.players.length < 2) return callback?.({ ok: false, error: 'The room does not have enough players to restart.' });
-    room.round = 0;
-    room.campaignStage = 1;
-    room.lives = room.maxLives;
-    room.capturedAis = [];
-    room.allies = [];
-    room.selectedAllyId = null;
-    room.pendingMergeAiId = null;
-    room.usedAiNames = [];
-    room.terminalEvents = [];
-    room.terminalSequence = 0;
-    room.thermalHeat = Object.fromEntries(room.players.map((player: any) => [player.id, 35]));
-    room.thermalLastRoll = {};
-    room.players.forEach((player: any) => { player.score = 0; player.alive = true; player.queuedForNextRound = false; });
-    room.narration = '';
+    restartFromRoundOne(room);
     callback?.({ ok: true });
-    startRound(room);
+  });
+  register('game:restart-request', (_data: any = {}, callback: any) => {
+    const room = rooms.get(socket.data.room);
+    const requester = room?.players.find((player: any) => player.id === socket.data.playerId && player.connected);
+    if (!room || !requester) return callback?.({ ok: false, error: 'Join the room again before requesting a restart.' });
+    if (room.config.mode === 'solo') return callback?.({ ok: false, error: 'Solo games restart directly.' });
+    if (!RESTARTABLE_PHASES.includes(room.phase)) return callback?.({ ok: false, error: 'Restart can be requested after a round ends.' });
+    if (room.restartVote?.status === 'open') return callback?.({ ok: false, error: 'A restart vote is already in progress.' });
+    const eligiblePlayerIds = room.players.filter((player: any) => player.connected).map((player: any) => player.id);
+    if (eligiblePlayerIds.length < 2) return callback?.({ ok: false, error: 'At least two connected players are needed to vote.' });
+    const resumeDeadline = room.deadline;
+    if (room.phaseTimer) clearTimeout(room.phaseTimer);
+    room.phaseTimer = null;
+    room.deadline = null;
+    room.restartVote = {
+      requesterId: requester.id,
+      requesterName: requester.name,
+      ballot: 1,
+      eligiblePlayerIds,
+      votes: {},
+      status: 'open',
+      resumeDeadline,
+    };
+    callback?.({ ok: true });
+    emit(room);
+  });
+  register('game:restart-vote', (data: any = {}, callback: any) => {
+    const room = rooms.get(socket.data.room);
+    const vote = room?.restartVote;
+    const playerId = socket.data.playerId;
+    if (!room || !vote || vote.status !== 'open') return callback?.({ ok: false, error: 'There is no open restart vote.' });
+    if (data.ballot !== vote.ballot) return callback?.({ ok: false, error: 'The vote changed. Please cast your vote again.' });
+    if (data.choice !== 'allow' && data.choice !== 'deny') return callback?.({ ok: false, error: 'Choose Allow or Deny.' });
+    if (!vote.eligiblePlayerIds.includes(playerId) || !room.players.some((player: any) => player.id === playerId && player.connected)) {
+      return callback?.({ ok: false, error: 'Only connected room players can vote.' });
+    }
+    if (vote.votes[playerId]) return callback?.({ ok: false, error: 'Your vote is already counted for this ballot.' });
+    vote.votes[playerId] = data.choice as RestartVoteChoice;
+    callback?.({ ok: true });
+    settleRestartVote(room);
   });
   register('game:back-to-options', (_data: any = {}, callback: any) => {
     const room = rooms.get(socket.data.room);
@@ -767,6 +861,7 @@ export function attachGameServer(transport: any) {
     if (room.phase === 'LOBBY') return callback?.({ ok: true });
     if (room.phaseTimer) clearTimeout(room.phaseTimer);
     room.phaseTimer = null;
+    room.restartVote = null;
     room.phase = 'LOBBY';
     room.round = 0;
     room.campaignStage = 1;
@@ -987,6 +1082,7 @@ export function attachGameServer(transport: any) {
       player.connected = false;
       player.socketId = null;
       if (player.id === room.hostId) room.hostSocketId = null;
+      if (room.restartVote?.status === 'open') settleRestartVote(room);
       syncRaidScaling(room);
       emit(room);
     }
