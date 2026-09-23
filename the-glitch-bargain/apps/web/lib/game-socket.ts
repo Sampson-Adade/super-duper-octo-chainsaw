@@ -55,8 +55,10 @@ export class GameSocket {
       connection.connect();
       return this;
     }
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+    const serverOrigin = process.env.NEXT_PUBLIC_GAME_URL || 'https://the-glitch-bargain.vercel.app';
+    const endpoint = new URL('/api/ws', serverOrigin);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(endpoint.toString());
     this.ws = ws;
     ws.addEventListener('message', (message) => {
       if (typeof message.data !== 'string') return;
