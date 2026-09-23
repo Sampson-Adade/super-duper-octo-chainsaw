@@ -1,0 +1,7 @@
+{
+  "name": "the-glitch-bargain",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {"dev": "dotenv -e .env -- concurrently -k -n server,web,proxy -c green,cyan,yellow \"npm run dev -w @glitch/server\" \"npm run dev -w @glitch/web\" \"node apps/web/proxy.mjs\"", "build": "npm run build -w @glitch/web", "start": "dotenv -e .env -- concurrently -k -n server,web,proxy -c green,cyan,yellow \"npm run start -w @glitch/server\" \"npm run start -w @glitch/web\" \"node apps/web/proxy.mjs\"", "start:server": "npm run start -w @glitch/server"},
+  "devDependencies": {"concurrently": "^9.1.2", "dotenv-cli": "^8.0.0", "typescript": "^5.7.3"}
+}

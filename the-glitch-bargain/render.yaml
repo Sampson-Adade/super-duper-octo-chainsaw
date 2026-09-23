@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: the-glitch-bargain
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: test -f .env || cp .env.example .env; npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: PROXY_PORT
+        value: "10000"
+      - key: SOCKET_PORT
+        value: "3001"
+      - key: WEB_PORT
+        value: "3002"
+      - key: CLIENT_URL
+        value: "*"
