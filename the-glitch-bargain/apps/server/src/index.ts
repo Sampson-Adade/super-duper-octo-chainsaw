@@ -740,7 +740,9 @@ export function attachGameServer(transport: any) {
   register('game:restart', (_data: any = {}, callback: any) => {
     const room = rooms.get(socket.data.room);
     if (!room || room.hostId !== socket.data.playerId) return callback?.({ ok: false, error: 'Only the host can restart the game.' });
-    if (room.phase !== 'GAME_OVER') return callback?.({ ok: false, error: 'Restart is available after the game ends.' });
+    if (!['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'].includes(room.phase)) {
+      return callback?.({ ok: false, error: 'Restart is available after a round ends.' });
+    }
     if (room.config.mode === 'solo' ? room.players.length !== 1 : room.players.length < 2) return callback?.({ ok: false, error: 'The room does not have enough players to restart.' });
     room.round = 0;
     room.campaignStage = 1;
@@ -754,7 +756,7 @@ export function attachGameServer(transport: any) {
     room.terminalSequence = 0;
     room.thermalHeat = Object.fromEntries(room.players.map((player: any) => [player.id, 35]));
     room.thermalLastRoll = {};
-    room.players.forEach((player: any) => { player.score = 0; player.alive = true; });
+    room.players.forEach((player: any) => { player.score = 0; player.alive = true; player.queuedForNextRound = false; });
     room.narration = '';
     callback?.({ ok: true });
     startRound(room);

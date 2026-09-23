@@ -373,7 +373,7 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
           <div className="actions">
             <button className="primary" onClick={create}>CREATE ROOM <span>↗</span></button>
             <div className="or">OR JOIN</div>
-            <input className={`roomcode${lockRoomCode ? ' roomcode-locked' : ''}`} placeholder="ROOM CODE" aria-label="Room code" title={lockRoomCode ? 'Room code came from your invite link' : undefined} readOnly={lockRoomCode} value={code} maxLength={6} onChange={(event) => setCode(event.target.value.toUpperCase())}/>
+            <input type="text" inputMode="text" enterKeyHint="go" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} className={`roomcode${lockRoomCode ? ' roomcode-locked' : ''}`} placeholder="ROOM CODE" aria-label="Room code" title={lockRoomCode ? 'Room code came from your invite link' : undefined} readOnly={lockRoomCode} value={code} maxLength={6} onChange={(event) => setCode(event.target.value.toUpperCase())}/>
             <button className="join" onClick={join}>JOIN <span>→</span></button>
           </div>
           {err && <div className="error">{err}</div>}
@@ -437,9 +437,9 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
         <div className="topactions">
           <button className="roomTag roomShare" onClick={copyInviteLink} aria-label="Copy room invite link">ROOM <b>{room.code}</b><span className={copied ? 'copied' : ''}>{copied ? 'LINK COPIED!' : 'COPY LINK'}</span></button>
           <button className="manualButton" onClick={() => setShowManual(true)}>HOW TO PLAY</button>
-          <button className="backButton" onClick={goBack} disabled={room.phase === 'LOBBY' || !me?.host} title={!me?.host ? 'Only the room host can return everyone to options' : room.phase === 'LOBBY' ? 'You are already at game options' : 'Return everyone to the in-room game mode selector'}>← GAME OPTIONS</button>
-          <button className="restartButton" disabled={!me?.host || room.phase !== 'GAME_OVER'} title={room.phase === 'GAME_OVER' ? 'Restart with the same players and settings' : 'Restart unlocks when the game ends'} onClick={restartGame}>RESTART GAME</button>
-          <button className="homeButton" onClick={goHome}>GO HOME</button>
+          <button className="backButton" onClick={goBack} disabled={room.phase === 'LOBBY' || !me?.host} title={!me?.host ? 'Only the room host can return everyone to options' : room.phase === 'LOBBY' ? 'You are already at the previous step' : 'Go back one step to room options'}>← Back</button>
+          <button className="restartButton" disabled={!me?.host || !['RESOLUTION', 'CAMPAIGN_BREAK', 'FUSION_SELECT', 'ALLY_SELECT', 'GAME_OVER'].includes(room.phase)} title="Restart the whole game from round one" onClick={restartGame}>RESTART GAME</button>
+          <button className="homeButton" onClick={goHome}>Home</button>
         </div>
       </header>
 
