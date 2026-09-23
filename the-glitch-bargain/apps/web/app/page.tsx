@@ -69,6 +69,7 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
   const [copied, setCopied] = useState(false);
   const [mergeTargetAllyId, setMergeTargetAllyId] = useState('');
+  const [fusionCaptureAiId, setFusionCaptureAiId] = useState('');
   const [origin, setOrigin] = useState('');
   const [thermalNotice, setThermalNotice] = useState('');
   const [showManual, setShowManual] = useState(false);
@@ -137,7 +138,11 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
     if (room?.phase === 'HACKING') { setSource(''); setAllyReply(''); setAllyPrompt(''); }
   }, [room?.round, room?.campaignStage, room?.phase]);
 
-  useEffect(() => { setMergeTargetAllyId(''); }, [room?.phase, room?.pendingMergeAiId]);
+  useEffect(() => {
+    if (room?.phase !== 'FUSION_SELECT') return;
+    setFusionCaptureAiId(room.pendingFusionAiIds[0] || '');
+    setMergeTargetAllyId(room.selectedAllyId || '');
+  }, [room?.phase, room?.pendingFusionAiIds.join(','), room?.selectedAllyId]);
 
   const selectedAllyRank = room?.allies.find((ally) => ally.id === room.selectedAllyId)?.rank ?? 0;
   const erasureInterval = room?.mode === 'raid'
@@ -214,11 +219,15 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   function requestAllyAssist() {
     socket?.emit('solo:assist', { source, prompt: allyPrompt }, (result: any) => {
       if (!result?.ok) return setErr(result?.error || 'AI ally support is unavailable.');
-      setSource(result.draft);
-      setAllyReply(`${result.reply} ${result.lines}/${result.totalLines} total lines are now in your draft; finish the rest yourself.`);
+      if (result.action === 'write_code') {
+        setSource(result.draft);
+        setAllyReply(`${result.reply} ${result.lines} line${result.lines === 1 ? '' : 's'} written; the 50% cap is enforced. Finish the rest yourself.`);
+      } else setAllyReply(result.reply);
       setErr('');
-      codeEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      codeEditorRef.current?.focus();
+      if (result.action === 'write_code') {
+        codeEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        codeEditorRef.current?.focus();
+      }
     });
   }
 
@@ -279,7 +288,7 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   }
 
   function resolveFusion(targetAllyId: string | null) {
-    socket?.emit('fusion:resolve', { targetAllyId }, (result: any) => {
+    socket?.emit('fusion:resolve', { defeatedAiId: fusionCaptureAiId, targetAllyId }, (result: any) => {
       if (!result?.ok) setErr(result?.error || 'Could not finish the fusion choice.');
       else { setMergeTargetAllyId(''); setErr(''); }
     });
@@ -450,7 +459,8 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   const restartDenyVotes = restartVote ? Object.values(restartVote.votes).filter((vote) => vote === 'deny').length : 0;
   const restartVotesWaiting = restartVote ? restartVote.eligiblePlayerIds.filter((id) => !restartVote.votes[id]).length : 0;
   const myRestartVote = restartVote?.votes[playerId];
-  const canVoteOnRestart = Boolean(restartVote?.status === 'open' && restartVote.eligiblePlayerIds.includes(playerId) && !myRestartVote);
+  const isRestartRequester = restartVote?.requesterId === playerId;
+  const canVoteOnRestart = Boolean(restartVote?.status === 'open' && !isRestartRequester && restartVote.eligiblePlayerIds.includes(playerId) && !myRestartVote);
 
   return (
     <main className={mainClass}>
@@ -479,10 +489,10 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
             <div className="eyebrow">{restartVote.status === 'open' ? `ROOM RESTART VOTE · BALLOT ${restartVote.ballot}` : 'RESTART VOTE RESULT'}</div>
             <h2 id="restartVoteTitle">{restartVote.status === 'open' ? `${restartVote.requesterName} wants to restart from round one.` : `${restartVote.requesterName}’s restart request was denied.`}</h2>
             {restartVote.status === 'open' ? <>
-              <p>{restartVote.ballot > 1 ? 'The last ballot was tied. Everyone votes again until Allow or Deny leads.' : 'Should the room restart from round one? Everyone in the room, including the requester, gets one vote.'}</p>
+              <p>{restartVote.ballot > 1 ? 'The last ballot was tied. The requester’s Allow remains counted; everyone else votes again until Allow or Deny leads.' : 'Should the room restart from round one? The requester’s request counts as one Allow vote; everyone else decides.'}</p>
               <div className="restartVoteTally"><span>ALLOW <b>{restartAllowVotes}</b></span><span>DENY <b>{restartDenyVotes}</b></span><span>WAITING <b>{restartVotesWaiting}</b></span></div>
               {canVoteOnRestart ? <div className="restartVoteActions"><button onClick={() => castRestartVote('allow')}>ALLOW RESTART</button><button onClick={() => castRestartVote('deny')}>DENY RESTART</button></div>
-                : <div className="restartVoteStatus">{myRestartVote ? `YOUR VOTE: ${myRestartVote.toUpperCase()} · WAITING FOR THE ROOM` : 'Waiting for connected room players to vote.'}</div>}
+                : <div className="restartVoteStatus">{isRestartRequester ? 'YOUR REQUEST COUNTS AS 1 ALLOW VOTE · WAITING FOR THE ROOM' : myRestartVote ? `YOUR VOTE: ${myRestartVote.toUpperCase()} · WAITING FOR THE ROOM` : 'Waiting for connected room players to vote.'}</div>}
             </> : <p>The room voted {restartAllowVotes} to allow and {restartDenyVotes} to deny. The current game continues.</p>}
           </section>}
 
@@ -510,12 +520,15 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
             <div className="threat verdict campaignCongrats"><div className="eyebrow">✦ TIER {room.campaignStage} COMPLETE</div><h2>Congratulations! You defeated all the AIs.</h2><p>Your captured AIs are now a roster. Pick one to carry into the next campaign tier.</p><div className="scores"><div><b>CAPTURED</b><span>{room.capturedAis.join(' · ')}</span><strong>{room.capturedAis.length}</strong></div></div></div>
             <div className="submitted">NEXT TIER STARTS WITH ONE BOSS AT A TIME. ALLY SELECTION OPENS IN A MOMENT.</div>
           </> : room.phase === 'FUSION_SELECT' ? <>
-            <div className="threat verdict fusionPrompt"><div className="eyebrow">BOSS CAPTURED · CHOICE REQUIRED</div><h2>{room.allies.find((ally) => ally.id === room.pendingMergeAiId)?.name || 'The defeated AI'}</h2><p>Choose one AI you already own to merge this capture into, or keep the new AI independent in your roster. Fusions raise rank and give a small code-stability bonus.</p></div>
-            <div className="allyGrid">{room.allies.filter((ally) => ally.id !== room.pendingMergeAiId).map((ally) => <button key={ally.id} className={`allyCard ${mergeTargetAllyId === ally.id ? 'selected' : ''}`} aria-pressed={mergeTargetAllyId === ally.id} onClick={() => setMergeTargetAllyId(ally.id)}><span className="allyRank">FUSION RANK {ally.rank}</span><strong>{ally.name}</strong><small>COMPONENTS: {ally.components.join(' + ')}</small><em>Merge the new capture into this AI.</em></button>)}</div>
-            {mergeTargetAllyId && <button className="primary full" onClick={() => resolveFusion(mergeTargetAllyId)}>CONFIRM FUSION WITH {room.allies.find((ally) => ally.id === mergeTargetAllyId)?.name} <span>⟷</span></button>}
-            <button className="keepAloneButton" onClick={() => resolveFusion(null)}>KEEP {room.allies.find((ally) => ally.id === room.pendingMergeAiId)?.name} SEPARATE</button>
+            <div className="threat verdict fusionPrompt"><div className="eyebrow">TIER COMPLETE · FUSION CHOICE</div><h2>Choose after the level, not after each boss.</h2><p>Select one AI captured during this tier, then choose which owned AI it should fuse with. You can also keep it independent; all other captures stay in your roster.</p></div>
+            <div className="eyebrow fusionSectionLabel">1 · SELECT A CAPTURE FROM THIS TIER</div>
+            <div className="allyGrid">{room.pendingFusionAiIds.map((id) => { const ally = room.allies.find((entry) => entry.id === id); if (!ally) return null; return <button key={ally.id} className={`allyCard ${fusionCaptureAiId === ally.id ? 'selected' : ''}`} aria-pressed={fusionCaptureAiId === ally.id} onClick={() => { setFusionCaptureAiId(ally.id); if (mergeTargetAllyId === ally.id) setMergeTargetAllyId(''); }}><span className="allyRank">CAPTURED THIS TIER</span><strong>{ally.name}</strong><small>COMPONENTS: {ally.components.join(' + ')}</small><em>Choose this AI as the new fusion component.</em></button>; })}</div>
+            <div className="eyebrow fusionSectionLabel">2 · CHOOSE YOUR AI TO FUSE IT WITH</div>
+            <div className="allyGrid">{room.allies.filter((ally) => ally.id !== fusionCaptureAiId).map((ally) => <button key={ally.id} className={`allyCard ${mergeTargetAllyId === ally.id ? 'selected' : ''}`} aria-pressed={mergeTargetAllyId === ally.id} onClick={() => setMergeTargetAllyId(ally.id)}><span className="allyRank">FUSION RANK {ally.rank}</span><strong>{ally.name}</strong><small>COMPONENTS: {ally.components.join(' + ')}</small><em>Keep this AI and add the selected capture to it.</em></button>)}</div>
+            {fusionCaptureAiId && mergeTargetAllyId && <button className="primary full" onClick={() => resolveFusion(mergeTargetAllyId)}>FUSE {room.allies.find((ally) => ally.id === fusionCaptureAiId)?.name} WITH {room.allies.find((ally) => ally.id === mergeTargetAllyId)?.name} <span>⟷</span></button>}
+            <button className="keepAloneButton" disabled={!fusionCaptureAiId} onClick={() => resolveFusion(null)}>KEEP {room.allies.find((ally) => ally.id === fusionCaptureAiId)?.name || 'SELECTED CAPTURE'} INDEPENDENT</button>
           </> : room.phase === 'ALLY_SELECT' ? <>
-            <div className="threat lobbyhint campaignIntro"><div className="eyebrow">TIER {room.campaignStage} · FUSION PREPARATION</div><p>Choose one captured AI to prompt once per boss. It will autofill up to half the required code, starting after your verified lines; you type the rest. After each victory, choose what to fuse or keep independent. Required code starts at 1.5× the first tier, then increases at an accelerating but gradual pace.</p><div className="fusionRules"><span>{room.rounds} BOSSES</span><span>{room.requiredCodeLines} REQUIRED CODE LINES</span><span>{clickAddCount} AUTO-ADD BUTTONS</span><span>ERASURE SPEEDS UP EACH TIER</span></div></div>
+            <div className="threat lobbyhint campaignIntro"><div className="eyebrow">TIER {room.campaignStage} · FUSION PREPARATION</div><p>Choose one captured AI to prompt once per boss. Ask it questions, request strategy, or tell it to write code; code writing starts after your verified lines and is capped at half the required lines. You type the rest. At the end of this tier, choose whether to fuse one of its captures or keep it independent. Required code grows at a gradual, accelerating pace.</p><div className="fusionRules"><span>{room.rounds} BOSSES</span><span>{room.requiredCodeLines} REQUIRED CODE LINES</span><span>{clickAddCount} AUTO-ADD BUTTONS</span><span>ERASURE SPEEDS UP EACH TIER</span></div></div>
             <div className="allyGrid">{room.allies.map((ally) => <button key={ally.id} className={`allyCard ${room.selectedAllyId === ally.id ? 'selected' : ''}`} aria-pressed={room.selectedAllyId === ally.id} onClick={() => selectAlly(ally.id)}><span className="allyRank">FUSION RANK {ally.rank}</span><strong>{ally.name}</strong><small>COMPONENTS: {ally.components.join(' + ')}</small><em>{ally.rank > 1 ? 'Fusion stability slows code erasure.' : 'A fresh core, ready to merge.'}</em></button>)}</div>
             <button className="primary full" disabled={!room.selectedAllyId} onClick={continueCampaign}>START TIER {room.campaignStage} <span>⚡</span></button>
           </> : <>
@@ -529,14 +542,14 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
               <div className="terminal">
                 <div className="terminalbar"><span className="dots"><i/><i/><i/></span><span>exploit.glitch</span><span className="level">{erasureActive ? 'ERASURE ACTIVE' : solo || raid ? `${room.requiredCodeLines} LINES REQUIRED` : `SYNTAX LVL ${room.syntaxLevel}`}</span></div>
                 <textarea ref={codeEditorRef} value={source} onChange={(event) => { setSource(event.target.value); if (event.target.value !== source) queueThermalRoll(); }} spellCheck={false} autoCapitalize="none" autoCorrect="off" placeholder={placeholder}/>
-                <div className="terminalfoot">{source.length}/1000{solo && room.campaignStage > 1 ? <span>ALLY AUTOFILLS UP TO {room.allyCodeLineCount}/{room.requiredCodeLines} LINES · YOU TYPE THE REST</span> : raid ? <span>ASSIGNED LINES ONLY · TYPE EACH LINE YOURSELF</span> : <span>MANUAL TYPING BUILDS HEAT · CHIP INSERTIONS DO NOT</span>}</div>
+                <div className="terminalfoot">{source.length}/1000{solo && room.campaignStage > 1 ? <span>ALLY WRITES UP TO {room.allyCodeLineCount}/{room.requiredCodeLines} LINES WHEN ASKED · YOU TYPE THE REST</span> : raid ? <span>ASSIGNED LINES ONLY · TYPE EACH LINE YOURSELF</span> : <span>MANUAL TYPING BUILDS HEAT · CHIP INSERTIONS DO NOT</span>}</div>
               </div>
-              {allyReply && <div className="allyDraft" aria-live="polite"><div className="eyebrow">ALLY RESPONSE · CODE AUTOFILLED</div><p>{allyReply}</p></div>}
+              {allyReply && <div className="allyDraft" aria-live="polite"><div className="eyebrow">ALLY RESPONSE · PROMPT EXECUTED</div><p>{allyReply}</p></div>}
               {solo && <div className="requiredCode nonCopyable" onCopy={(event) => event.preventDefault()} onCut={(event) => event.preventDefault()} onContextMenu={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()}><div className="eyebrow">REQUIRED CODE · TYPE THESE LINES</div><ol>{soloRequiredCodeLines.map((line, index) => <li key={`${index}-${line}`}><code>{line}</code></li>)}</ol><small>{clickAddCount} of {soloRequiredCodeLines.length} lines have auto-add buttons. Type every other line yourself.</small></div>}
               {!solo && !raid && <div className="requiredCode multiplayerRecipe nonCopyable" onCopy={(event) => event.preventDefault()} onCut={(event) => event.preventDefault()} onContextMenu={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()}><div className="eyebrow">MULTIPLAYER · THREE CORE LINES</div><ol>{multiplayerCoreCodeLines.map((line, index) => <li key={line}><code>{line}</code><small>{index === 0 ? '1 · Match the threat shown above.' : index === 1 ? '2 · Target the other operative shown here. You may type another player’s exact callsign.' : '3 · Keep this bypass line in your answer.'}</small></li>)}</ol><div className="recipeExtras"><b>{room.syntaxLevel >= 2 ? 'OPTIONAL · LEVEL 2+' : 'NEXT UP · LEVEL 2+'}</b><code>require player.holding(&quot;metal&quot;);</code><code>unless target.is(&quot;hat&quot;);</code><small>Add a condition or a physical claim. Players can challenge claims; the host verifies them.</small></div>{room.syntaxLevel >= 3 && <div className="recipeExtras"><b>OPTIONAL · LEVEL 3</b><code>{`redirect target to "${targetText}";`}</code><code>override system.purge();</code><small>Use these advanced lines only when you want to add a redirect or override.</small></div>}<small>Start with the three core lines. Two add buttons are available now; one more unlocks at each syntax level. Type the rest yourself.</small></div>}
               {raid && <div className="requiredCode nonCopyable" onCopy={(event) => event.preventDefault()} onCut={(event) => event.preventDefault()} onContextMenu={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()}><div className="eyebrow">YOUR ASSIGNED LINES · FOLLOW THE NUMBER</div><ol>{raidCodeLines.map((line, index) => <li key={`${index}-${line}`}><code>{line}</code><small>{index < 3 && raidAssignment?.playerId === room.raidAssignments[0]?.playerId ? `LEAD LINE ${index + 1}` : `YOUR LINE ${index + 1}`}</small></li>)}</ol><small>The lead writes three opening lines. Every operative, including the lead, writes two personal lines.</small></div>}
               {visibleChips.length > 0 && <div className="chips"><div className="eyebrow">QUICK ADD · {clickAddCount} BUTTONS UNLOCKED</div>{visibleChips.map((chip) => { const guideLines = solo ? soloRequiredCodeLines : raid ? raidCodeLines : multiplayerGuideLines; const lineNumber = guideLines.indexOf(chip) + 1; return <button key={chip} aria-label={`Add line ${lineNumber}`} disabled={source.split(/\r?\n/).some((line) => line.trim() === chip.trim())} onClick={() => addChip(chip, guideLines)}>+ LINE {lineNumber}</button>; })}<small>Quick Add inserts one line in the right order. You type everything else.</small></div>}
-              {solo && room.campaignStage > 1 && room.selectedAllyId && (() => { const activeAlly = room.allies.find((ally) => ally.id === room.selectedAllyId); const locked = !activeAlly || activeAlly.obedienceTier === 0; return <div className="allyAssist"><label className="eyebrow" htmlFor="allyPrompt">PROMPT YOUR AI ALLY · OPTIONAL</label><input id="allyPrompt" className="allyPrompt" value={allyPrompt} maxLength={160} onChange={(event) => setAllyPrompt(event.target.value)} placeholder="e.g. focus on disabling the boss shield" disabled={room.assistUsed || locked}/><small>Your prompt guides its response. It can only autofill up to half of this round’s required lines.</small><button className={`assistButton${locked ? ' assistLocked' : ''}`} disabled={room.assistUsed || locked} onClick={requestAllyAssist}>{locked ? 'ALLY LOCKED · TIER 0' : room.assistUsed ? 'ALLY SUPPORT SPENT THIS BOSS' : `CALL ${activeAlly?.name} · AUTOFILL UP TO HALF`}</button></div>; })()}
+              {solo && room.campaignStage > 1 && room.selectedAllyId && (() => { const activeAlly = room.allies.find((ally) => ally.id === room.selectedAllyId); const locked = !activeAlly || activeAlly.obedienceTier === 0; return <div className="allyAssist"><label className="eyebrow" htmlFor="allyPrompt">GIVE {activeAlly?.name || 'YOUR ALLY'} A PROMPT</label><textarea id="allyPrompt" className="allyPrompt" value={allyPrompt} rows={3} maxLength={500} onChange={(event) => setAllyPrompt(event.target.value)} placeholder="Ask a question, request a strategy, or tell it what to code" disabled={room.assistUsed || locked}/><small>It responds to your request. It changes your draft only when you ask it to write code, and can write at most half of the required lines.</small><button className={`assistButton${locked ? ' assistLocked' : ''}`} disabled={room.assistUsed || locked} onClick={requestAllyAssist}>{locked ? 'ALLY LOCKED · TIER 0' : room.assistUsed ? 'ALLY SUPPORT SPENT THIS BOSS' : `ASK ${activeAlly?.name} TO ACT`}</button></div>; })()}
               {erasureActive && <div className="eraseNotice">WARNING // {room.aiName || 'THE RAID BOSS'} IS DELETING CODE FROM THE START · {Math.ceil(1000 / erasureInterval)} CHARS/SEC</div>}
               {me && <div className="thermalHud"><div><span>THERMAL LOAD</span><strong>{me.thermalHeat}%</strong></div><div className="thermalTrack"><i style={{ width: `${me.thermalHeat}%` }}/></div><small>{thermalNotice || 'MANUAL TYPING MAY VENT HEAT OR CAUSE A SPIKE'}</small></div>}
               <button className="primary full" onClick={submit}>{raid ? 'SUBMIT YOUR LINES' : 'SUBMIT CODE'} <span>↗</span></button>
