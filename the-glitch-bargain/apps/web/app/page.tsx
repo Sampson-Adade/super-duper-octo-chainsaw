@@ -13,6 +13,10 @@ const difficultyOptions: { id: Difficulty; label: string; seconds: number }[] = 
   { id: 'hard', label: 'HARD', seconds: 30 },
 ];
 
+// Always share the public production address from deployed previews too. Vercel
+// preview URLs can require the project owner to log in, which blocks invitees.
+const PUBLIC_GAME_ORIGIN = process.env.NEXT_PUBLIC_GAME_URL || 'https://the-glitch-bargain.vercel.app';
+
 function token() {
   const make = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -72,7 +76,11 @@ export default function Home({ initialRoomCode = '', lockRoomCode = false }: Hom
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const codeEditorRef = useRef<HTMLTextAreaElement | null>(null);
 
-  useEffect(() => { setOrigin(window.location.origin); }, []);
+  useEffect(() => {
+    const hostname = window.location.hostname;
+    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    setOrigin(isLocal ? window.location.origin : PUBLIC_GAME_ORIGIN.replace(/\/$/, ''));
+  }, []);
   useEffect(() => { if (initialRoomCode) setCode(initialRoomCode.toUpperCase()); }, [initialRoomCode]);
   useEffect(() => () => {
     if (thermalTimer.current) clearTimeout(thermalTimer.current);
