@@ -133,11 +133,32 @@ function soloActions(stage: number, aiName: string, playerName: string) {
 function connectedLivingPlayers(room: any) {
   return room.players.filter((player: any) => player.alive && player.connected && !player.queuedForNextRound);
 }
+function promoteRoomHost(room: any) {
+  const nextHost = room.players.find((player: any) => player.connected && player.socketId) || null;
+  room.hostId = nextHost?.id ?? null;
+  room.hostSocketId = nextHost?.socketId ?? null;
+  for (const player of room.players) player.host = nextHost ? player.id === nextHost.id : false;
+  if (nextHost) terminalEvent(room, `${nextHost.name} is now the room host.`);
+}
+function ensureRoomHost(room: any) {
+  const activeHost = room.players.find((player: any) => player.id === room.hostId && player.connected && player.socketId);
+  if (activeHost) {
+    room.hostSocketId = activeHost.socketId;
+    for (const player of room.players) player.host = player.id === activeHost.id;
+    return;
+  }
+  promoteRoomHost(room);
+}
 function raidAssignments(room: any): RaidAssignment[] {
   const participants = connectedLivingPlayers(room);
   if (!participants.length) return [];
   const boss = room.aiName || 'CORE-0';
   const basePlayerId = participants[0].id;
+  const personalLines = (player: any) => room.syntaxLevel >= 3
+    ? [`redirect target to "${boss}";`, 'override system.purge();']
+    : room.syntaxLevel >= 2
+      ? ['require player.holding("metal");', 'unless target.is("hat");']
+      : [`protect operative "${player.name}";`, `calibrate relay "${player.name}";`];
   return participants.map((player: any) => ({
     playerId: player.id,
     lines: [
@@ -146,8 +167,7 @@ function raidAssignments(room: any): RaidAssignment[] {
         `define target as "${boss}";`,
         'trigger bypass on player;',
       ] : []),
-      `protect operative "${player.name}";`,
-      `calibrate relay "${player.name}";`,
+      ...personalLines(player),
     ],
   }));
 }
@@ -183,7 +203,11 @@ function parseRaidContribution(source: string, assignment: RaidAssignment) {
   for (const line of required) {
     if (lines.filter((candidate) => candidate === line).length !== 1) errors.push(`Add exactly one copy of: ${line};`);
   }
-  return { valid: errors.length === 0, errors, claims: [] };
+  const claims = lines.flatMap((line) => {
+    const item = line.match(/^require player\.holding\("([a-zA-Z -]+)"\)$/)?.[1];
+    return item ? [{ type: 'holding', item, verified: null as boolean | null }] : [];
+  });
+  return { valid: errors.length === 0, errors, claims };
 }
 function parse(source: string, level: number, players: any[], expectedTrigger: string, solo = false, aiName = '', playerName = '', campaignStage = 1, soloRequiredCode: string[] = []) {
   const errors: string[] = [];
@@ -295,6 +319,7 @@ function pub(room: any, revealClaims = false) {
     selectedAllyId: room.selectedAllyId,
     pendingMergeAiId: room.pendingMergeAiId,
     pendingFusionAiIds: [...(room.pendingFusionAiIds || [])],
+    missedSubmissionPlayerIds: [...(room.missedSubmissionPlayerIds || [])],
     requiredCodeLines: required,
     requiredCode: room.config.mode === 'solo' ? [...(room.soloRequiredCode || [])] : [],
     allyCodeLineCount: Math.floor(required / 2),
@@ -345,6 +370,11 @@ function schedulePhaseDeadline(room: any, expectedPhase: Phase) {
   }, wait);
 }
 function enterReview(room: any) {
+  const submitted = new Set(room.submissions.map((submission: any) => submission.playerId));
+  const participants = room.config.mode === 'raid'
+    ? raidAssignments(room).map((assignment) => assignment.playerId)
+    : connectedLivingPlayers(room).map((player: any) => player.id);
+  room.missedSubmissionPlayerIds = participants.filter((playerId: string) => !submitted.has(playerId));
   if (room.config.mode === 'raid') {
     const assignments = raidAssignments(room);
     room.raidIncomplete = assignments.some((assignment: RaidAssignment) => !room.submissions.some((submission: any) => submission.playerId === assignment.playerId));
@@ -454,6 +484,8 @@ function advance(room: any) {
 }
 function startRound(room: any, retry = false) {
   room.restartVote = null;
+  room.missedSubmissionPlayerIds = [];
+  room.assistUsed = false;
   if (!retry) {
     room.terminalEvents = [];
     room.terminalSequence = 0;
@@ -477,7 +509,6 @@ function startRound(room: any, retry = false) {
     room.threat = threat.text;
     room.threatType = threat.trigger;
     room.aiName = room.config.mode === 'solo' || room.config.mode === 'raid' ? randomAIName(room) : null;
-    room.assistUsed = false;
     room.raidParticipantIds = [];
     room.raidIncomplete = false;
   }
@@ -514,6 +545,7 @@ function restartFromRoundOne(room: any) {
   room.terminalSequence = 0;
   room.thermalHeat = Object.fromEntries(room.players.map((player: any) => [player.id, 35]));
   room.thermalLastRoll = {};
+  room.missedSubmissionPlayerIds = [];
   room.players.forEach((player: any) => { player.score = 0; player.alive = true; player.queuedForNextRound = false; });
   room.narration = '';
   startRound(room);
@@ -656,6 +688,18 @@ async function adjudicate(room: any): Promise<{ quality: Record<string, number>;
 }
 async function resolve(room: any) {
   if (room.phase !== 'CHALLENGE') return;
+  const raidRoundAssignments: RaidAssignment[] = room.config.mode === 'raid' ? raidAssignments(room) : [];
+  const eligiblePlayerIds = room.config.mode === 'raid'
+    ? raidRoundAssignments.map((assignment) => assignment.playerId)
+    : connectedLivingPlayers(room).map((player: any) => player.id);
+  const submittedAtResolution = new Set(room.submissions.map((submission: any) => submission.playerId));
+  room.missedSubmissionPlayerIds = eligiblePlayerIds.filter((playerId: string) => !submittedAtResolution.has(playerId));
+  if (room.config.mode === 'multiplayer') {
+    for (const playerId of room.missedSubmissionPlayerIds) {
+      const player = room.players.find((entry: any) => entry.id === playerId);
+      if (player) player.score -= 30;
+    }
+  }
   phase(room, 'ADJUDICATING', 10);
   const verdict = await adjudicate(room);
   if (room.phase !== 'ADJUDICATING') return;
@@ -689,19 +733,25 @@ async function resolve(room: any) {
   }
   room.challenges = challengeOutcomes;
   if (room.config.mode === 'raid') {
-    const assignments = raidAssignments(room);
+    const assignments = raidRoundAssignments;
     const contributed = new Set(room.submissions.map((submission: any) => submission.playerId));
     const raidWon = assignments.length >= 2 && assignments.every((assignment: RaidAssignment) => contributed.has(assignment.playerId));
     room.raidIncomplete = !raidWon;
     for (const assignment of assignments) {
       const player = room.players.find((entry: any) => entry.id === assignment.playerId);
       if (!player) continue;
-      player.score += raidWon ? 125 + ((verdict.quality[player.id] ?? 0) >= 3 ? 25 : 0) : -30;
+      if (raidWon) player.score += 125 + ((verdict.quality[player.id] ?? 0) >= 3 ? 25 : 0);
+      else if (contributed.has(player.id)) player.score += 25;
+      else player.score -= 30;
     }
+    const missingNames = room.missedSubmissionPlayerIds.map((playerId: string) => room.players.find((player: any) => player.id === playerId)?.name).filter(Boolean);
     room.narration = raidWon
       ? `${room.aiName} was breached. ${requiredCodeLines(room)} required lines were assembled by ${assignments.length} operatives. ${verdict.narration}`
-      : `Raid incomplete: every connected operative must finish their assigned lines. ${verdict.narration}`;
-  } else room.narration = verdict.narration;
+      : `Raid incomplete. ${missingNames.length ? `${missingNames.join(', ')} missed their assignment and lost 30 points; contributors earned 25 participation points. ` : 'Review the team verdict and try again. '}${verdict.narration}`;
+  } else {
+    const missingNames = room.missedSubmissionPlayerIds.map((playerId: string) => room.players.find((player: any) => player.id === playerId)?.name).filter(Boolean);
+    room.narration = `${verdict.narration}${missingNames.length ? ` ${missingNames.join(', ')} missed the submission and lost 30 points.` : ''}`;
+  }
   phase(room, 'RESOLUTION', 6);
 }
 
@@ -752,6 +802,7 @@ export function attachGameServer(transport: any) {
       syntaxLevel: 1, threatType: 'purge', submissions: [], challenges: [], hostSocketId: socket.id,
       aiName: null, soloRequiredCode: [], lives: 3, maxLives: 3, capturedAis: [], usedAiNames: [], assistUsed: false, counterCode: null, soloOutcome: null,
       terminalEvents: [], terminalSequence: 0, thermalHeat: { [id]: 35 }, thermalLastRoll: {}, raidParticipantIds: [], raidIncomplete: false,
+      missedSubmissionPlayerIds: [],
       restartVote: null,
     };
     rooms.set(code, room);
@@ -787,6 +838,7 @@ export function attachGameServer(transport: any) {
     if (player.id === room.hostId) room.hostSocketId = socket.id;
     socket.data.playerId = player.id;
     socket.data.room = room.code;
+    ensureRoomHost(room);
     syncRaidScaling(room);
     callback?.({ ok: true, code: room.code, playerId: player.id, queued: Boolean(player.queuedForNextRound) });
     emit(room);
@@ -896,6 +948,7 @@ export function attachGameServer(transport: any) {
     room.terminalSequence = 0;
     room.thermalHeat = Object.fromEntries(room.players.map((player: any) => [player.id, 35]));
     room.thermalLastRoll = {};
+    room.missedSubmissionPlayerIds = [];
     room.raidParticipantIds = [];
     room.raidIncomplete = false;
     room.narration = 'Back at room options. Everyone stays in the room; choose a mode and start again when ready.';
@@ -933,7 +986,11 @@ export function attachGameServer(transport: any) {
     callback?.({ ok: true });
     io.to(room.code).emit('hack:submitted', { playerId });
     if (room.config.mode === 'solo') finishSoloSuccess(room, playerId);
-    else emit(room);
+    else if (room.config.mode === 'multiplayer') {
+      const participants = connectedLivingPlayers(room);
+      if (participants.length >= 2 && participants.every((player: any) => room.submissions.some((submission: any) => submission.playerId === player.id))) enterReview(room);
+      else emit(room);
+    } else emit(room);
   });
   register('solo:assist', async (data: any = {}, callback: any) => {
     const room = rooms.get(socket.data.room);
@@ -942,7 +999,7 @@ export function attachGameServer(transport: any) {
     const ally = room.allies.find((entry: any) => entry.id === room.selectedAllyId);
     if (room.campaignStage < 2 || !ally) return callback?.({ ok: false, error: 'Choose a captured AI ally before starting this campaign tier.' });
     if (ally.obedienceTier === 0) return callback?.({ ok: false, error: `${ally.name} is locked at obedience Tier 0. Survive a round without an assist or land a verified physical bluff to reboot it.` });
-    if (room.assistUsed) return callback?.({ ok: false, error: 'Your AI ally has already assisted this round.' });
+    if (room.assistUsed) return callback?.({ ok: false, error: 'Your AI ally has already assisted on this attempt.' });
     if (room.submissions.some((submission: any) => submission.playerId === playerId)) return callback?.({ ok: false, error: 'You already submitted this round.' });
     const player = room.players[0];
     const requiredCode: string[] = room.soloRequiredCode || [];
@@ -1111,12 +1168,7 @@ export function attachGameServer(transport: any) {
     if (!room.players.length) {
       rooms.delete(room.code);
     } else {
-      if (room.hostId === playerId) {
-        const nextHost = room.players.find((player: any) => player.connected) || room.players[0];
-        room.hostId = nextHost.id;
-        room.players.forEach((player: any) => { player.host = player.id === nextHost.id; });
-        room.hostSocketId = [...io.sockets.sockets.values()].find((candidate: any) => candidate.data.room === room.code && candidate.data.playerId === nextHost.id)?.id || null;
-      }
+      if (room.hostId === playerId) promoteRoomHost(room);
       syncRaidScaling(room);
       emit(room);
     }
@@ -1156,7 +1208,7 @@ export function attachGameServer(transport: any) {
     if (player && (!player.socketId || player.socketId === socket.id)) {
       player.connected = false;
       player.socketId = null;
-      if (player.id === room.hostId) room.hostSocketId = null;
+      if (player.id === room.hostId) promoteRoomHost(room);
       if (room.restartVote?.status === 'open') settleRestartVote(room);
       syncRaidScaling(room);
       emit(room);

@@ -104,14 +104,15 @@ export function HowToPlay({ open, onClose, mode = 'multiplayer', difficulty = 'm
           </>)}
           {selectedLevel === 2 && (selectedMode === 'solo' ? <>
             <p><b>Level 2 · Your first AI ally.</b> Clear your opening tier, choose one captured AI, and select the ally you want to bring forward. Boss recipes add randomized required actions, so use this round’s guide.</p>
-            <div className="manualRules"><b>THE 50% LIMIT</b><p>Prompt your ally once per boss. It starts after your correctly typed progress and fills no more than half of the full recipe; you complete the rest. Keep an eye on its obedience tier.</p></div>
+            <div className="manualRules"><b>THE 50% LIMIT</b><p>Prompt your ally once per attempt. It starts after your correctly typed progress and fills no more than half of the full recipe; you complete the rest. A retry gives you a fresh summon if the ally’s obedience is above Tier 0.</p></div>
           </> : selectedMode === 'multiplayer' ? <>
             <p><b>Level 2 · Add a condition or a physical claim.</b> Multiplayer reaches Level 2 on round 3. A physical claim can be checked by the host and challenged by another player.</p>
             <div className="manualCodeList"><code>require player.holding(&quot;metal&quot;);</code><code>unless target.is(&quot;hat&quot;);</code></div>
             <p>Claims make the round more interesting, but a false claim can cost you. Your code still needs its three core lines.</p>
           </> : <>
-            <p><b>Level 2 · The squad grows.</b> Raid assignments stay simple: the lead has three opening lines, and each operative has two personal lines. More living players increase total work and extend the timer.</p>
-            <p>Use the assignment card as your source of truth. Do not type another operative’s lines.</p>
+            <p><b>Level 2 · Add a claim and condition.</b> The lead still has three opening lines. Each operative’s two personal lines now ask for a physical metal claim and a target condition. A claim can be checked by the host and challenged by a teammate.</p>
+            <div className="manualCodeList"><code>require player.holding(&quot;metal&quot;);</code><code>unless target.is(&quot;hat&quot;);</code></div>
+            <p>Assignments still total three opening lines plus two for each operative. Follow the lines on your own card.</p>
           </>)}
           {selectedLevel === 3 && (selectedMode === 'solo' ? <>
             <p><b>Level 3 · The bosses adapt.</b> Solo recipes keep adding randomized required actions as your campaign grows, and code erasure speeds up. Use every line on the current boss’s guide.</p>
@@ -121,8 +122,9 @@ export function HowToPlay({ open, onClose, mode = 'multiplayer', difficulty = 'm
             <div className="manualCodeList"><code>redirect target to &quot;CALLSIGN&quot;;</code><code>override system.purge();</code></div>
             <p>Your three core lines are still required; use the extra rules only when you want to add them.</p>
           </> : <>
-            <p><b>Level 3 · A faster raid.</b> The raid boss scales with the round and crew size. Each operative still follows their own assignment; more operatives mean more total lines and faster code erasure.</p>
-            <p>Split the work, use Quick Add for your first lines, and call out if someone needs help before the deadline.</p>
+            <p><b>Level 3 · Redirect and override.</b> Each operative’s two personal lines now redirect the target and override the purge. The three opening lines stay with the raid lead.</p>
+            <div className="manualCodeList"><code>redirect target to &quot;BOSS NAME&quot;;</code><code>override system.purge();</code></div>
+            <p>More operatives increase total work and extend the timer; the boss erases code faster as the crew grows.</p>
           </>)}
         </div>
 
